@@ -29,9 +29,7 @@ def enforceDisallowedDirs(dirs):
     return 0, ""
 
 def getNetwork(allData):
-    line = allData.split("\n")[1]
-    host = line.split(":")[1].strip()
-    return host
+    pass
 
 def buildResponse(responseDict, status):
     jsonString = json.dumps(responseDict)
@@ -44,48 +42,20 @@ Content-Length: """ + str(len(jsonString)) + """
 
 """ + jsonString, "UTF-8")
 
-def makeNewContainer(net):
-    subprocess.call("docker -H localhost:1234 build --build-arg root_passwd='meep2' --build-arg dockerhost=" + str(net) + " -t ssh_cont .", shell=True)
-
-
-def associateContainerWithUser(containerHash, net):
+def associateContainerWithUser(containerHash):
     global docker_client
+
     printable = codecs.decode(containerHash, "unicode_escape")    
     chash = json.loads(printable.split("\n")[9])
+    print(str(chash))
     c = docker_client.containers.get(chash)
-    network = None
-    newContainerHash = None
-    if("com.docker-rbac.user_admin" in c.labels.keys()):
-        network = docker_client.networks.create(''.join(random.choices(string.ascii_uppercase + string.digits, k=12)), driver="bridge", internal=True)
-        print("created new network for admin container")
-        c.remove(force=True)
-        makeNewContainer(net)
-        c = docker_client.containers.run("ssh_cont", ports={'22': 0},  detach=True)
-        newContainerHash = c.id
-    else:
-        networks = docker_client.networks.list(greedy=True)
-        for n in networks:
-            if(len(n.attrs["IPAM"]["Config"]) > 0 and n.attrs["IPAM"]["Config"][0]["Gateway"] == net):
-                network = n
-        print("added container to existing network")
-    network.connect(c)
-    print("NETWORK ATTRIBUTES")
-    print(network.attrs)
-    print("our gateway is \n\n\n\n" + network.attrs["IPAM"]["Config"][0]["Gateway"] + "\n\n\n\n")
-    if(newContainerHash != None):
-        return newContainerHash
-    else:
-        return 0
+    ssh_cont = docker_client.containers.get(ssh_container_hash)
+    ssh_container_net.connect(c)
 
 def commandRouter(url, data, allData):
     global routeNextRequestToCallback
+    global ssh_container_net
     global newData
-    ssh_container_net = None
-    networks = docker_client.networks.list(greedy=True)
-    for n in networks:
-        print(n.attrs["IPAM"]["Config"])
-        if(len(n.attrs["IPAM"]["Config"]) > 0 and n.attrs["IPAM"]["Config"][0]["Gateway"] == getNetwork(allData)):
-            ssh_container_net = n
     spliturl = url.split("/")
     del spliturl[0]
     print(str(spliturl))
@@ -100,16 +70,13 @@ def commandRouter(url, data, allData):
                     if(status == -1):
                         return buildResponse({"message": "you are not allowed to bind " + str(offendingDir)}, 400)
                     else:
-                        
+                        if("com.docker-rbac.user_admin" in params["Labels"].keys()):
+                            network = docker_client.networks.create(''.join(random.choices(string.ascii_uppercase + string.digits, k=12)), driver="bridge", internal=True)
+                            network.connect(ssh_cont)
 
                         def callback(containerHash, transport):
-                            newContainerHash = associateContainerWithUser(containerHash, getNetwork(allData))
-                            if(newContainerHash != 0):
-                                containerHash = "HTTP/1.1 201 Created\r\nApi-Version: 1.39\r\nContent-Type: application/json\r\nDocker-Experimental: false\r\nOstype: linux\r\nServer: Docker/18.09.2 (linux)\r\nDate: Sun, 24 Feb 2019 16:28:02 GMT\r\nContent-Length: 90\r\n\r\n{\"Id\":\"" + newContainerHash + ", \"Warnings\":null}"
-                                
-                                transport.write(bytes(containerHash, "utf-8"))
-                            else:
-                                transport.write(containerHash)
+                            associateContainerWithUser(containerHash)
+                            transport.write(containerHash)
                         routeNextRequestToCallback = callback
                 elif(spliturl[1] == "json"): # docker ps
                     newurl = url + "?all=1"
@@ -146,7 +113,7 @@ def parseIncoming(data):
 
 class ServerProtocol(protocol.Protocol):
     def __init__(self):
-        self.buffer = ''
+        self.buffer = None
         self.client = None
 
     def connectionMade(self):
